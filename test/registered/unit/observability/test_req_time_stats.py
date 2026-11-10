@@ -50,8 +50,9 @@ class TestOutputTimeStatsKeepUnsetStamps(CustomTestCase):
         with mock.patch.object(rts, "global_diff_realtime_monotonic", 1_000_000.0):
             sent = _round_trip(stats.to_output_time_stats())
 
-        self.assertIsNone(sent.prefill_finished_time)
-        self.assertNotIn("prefill_finished_time", sent.to_meta_info())
+        for unset in ("prefill_finished_time", "decode_prebuilt_finish_time"):
+            self.assertIsNone(getattr(sent, unset))
+            self.assertNotIn(unset, sent.to_meta_info())
         self.assertAlmostEqual(sent.forward_entry_time, 1_000_123.456)
 
     def test_metrics_disabled_sends_no_time_stats(self):
@@ -255,6 +256,25 @@ class TestQueueTimeAcrossRetraction(CustomTestCase):
         stats.set_quick_finish_time(self.T0 + 1.30)
 
         self.assertAlmostEqual(stats.get_queueing_time(), 0.35)
+
+    def test_decode_rebootstrap_keeps_first_token_time(self):
+        """A rebootstrapped decode request re-runs the prebuilt step; the first
+        token's time must not move to the resume, but the decode-loop base must."""
+        stats = self._stats(disagg_mode=rts.DisaggregationMode.DECODE)
+        stats.set_decode_prebuilt_finish_time(self.T0 + 0.10)
+        stats.set_retract_time(self.T0 + 0.50)
+        stats.set_decode_prebuilt_finish_time(self.T0 + 1.25)
+
+        sent = _round_trip(stats.to_output_time_stats())
+        self.assertAlmostEqual(
+            sent.decode_prebuilt_finish_time,
+            rts.convert_time_to_realtime(self.T0 + 0.10),
+        )
+        with mock.patch.object(stats, "trace_slice") as trace_slice:
+            stats.set_last_decode_finish_time(self.T0 + 1.30)
+        trace_slice.assert_called_once_with(
+            rts.RequestStage.DECODE_LOOP, self.T0 + 1.25, self.T0 + 1.30, mock.ANY
+        )
 
     def test_prefill_retry_reset_discards_earlier_attempt_waits(self):
         stats = self._stats(disagg_mode=rts.DisaggregationMode.PREFILL)

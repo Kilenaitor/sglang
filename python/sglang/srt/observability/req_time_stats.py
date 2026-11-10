@@ -667,6 +667,8 @@ class SchedulerOutputTimeStats(
     forward_entry_time: Optional[float] = None
     prefill_finished_time: Optional[float] = None
     queue_time: float = 0.0
+    # PD decode only: the first local prebuilt completion, after KV transfer.
+    decode_prebuilt_finish_time: Optional[float] = None
 
     def to_meta_info(self) -> Dict[str, float]:
         return {
@@ -717,6 +719,7 @@ class SchedulerReqTimeStats(ReqTimeStatsBase):
     decode_prealloc_queue_entry_time: float = 0.0
     decode_transfer_queue_entry_time: float = 0.0
     decode_prebuilt_finish_time: float = 0.0
+    last_decode_prebuilt_finish_time: float = 0.0
 
     # bootstrap sub-phase tracking (PD disagg)
     bootstrap_done_time: float = 0.0
@@ -757,6 +760,9 @@ class SchedulerReqTimeStats(ReqTimeStatsBase):
             queue_time=self.get_queueing_time(),
             forward_entry_time=_stamped_realtime(self.forward_entry_time),
             prefill_finished_time=_stamped_realtime(self.prefill_finished_time),
+            decode_prebuilt_finish_time=_stamped_realtime(
+                self.decode_prebuilt_finish_time
+            ),
             storage_prefetch_wait=_finished_wait(
                 self.storage_prefetch_wait_s, self._storage_prefetch_wait
             ),
@@ -963,7 +969,7 @@ class SchedulerReqTimeStats(ReqTimeStatsBase):
         if self.enable_metrics or self.trace_ctx.tracing_enable:
             if last_time == 0.0:
                 if self.disagg_mode == DisaggregationMode.DECODE:
-                    last_time = self.decode_prebuilt_finish_time
+                    last_time = self.last_decode_prebuilt_finish_time
                 else:
                     if (
                         self.last_decode_scheduled_time
@@ -1148,7 +1154,11 @@ class SchedulerReqTimeStats(ReqTimeStatsBase):
 
     def set_decode_prebuilt_finish_time(self, ts=None):
         ts = ts or time.perf_counter()
-        self.decode_prebuilt_finish_time = ts
+        # A retraction rebootstrap re-runs this method. Don't overwrite the stamp so
+        # timing stays relative to the first token rather than the rebootstrap.
+        if self.decode_prebuilt_finish_time == 0.0:
+            self.decode_prebuilt_finish_time = ts
+        self.last_decode_prebuilt_finish_time = ts
 
         stage = RequestStage.DECODE_FAKE_OUTPUT
         self.observe_per_stage_req_latency(stage, ts - self.last_forward_entry_time)

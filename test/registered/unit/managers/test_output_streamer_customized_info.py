@@ -1,6 +1,5 @@
 import dataclasses
 import pickle
-import time
 import unittest
 from array import array
 from types import SimpleNamespace
@@ -575,17 +574,22 @@ class TestOutputStreamerDecodeLatency(unittest.TestCase):
         _enter_streamer_scope(self)
 
     def test_rust_mode_times_finished_non_streaming_requests(self):
-        """In Rust mode a finished non-streaming request's decode latency runs
-        from the prefill stamp, which Python's TokenizerManager reads only with
-        metrics on, and the scheduler hands it to the Rust frontend by payload
-        row with the batch; other requests, and Python mode, record none."""
-        stamp = time.perf_counter() - 0.5
+        """Only finished non-streaming requests with metrics on and a valid
+        first-token stamp are timed. A PD decode request is timed from its first
+        prebuilt stamp, not from a later resume."""
+        stamp = 1000.5
 
-        def req(rid, *, stream=False, finished=True, metrics=True, stamp=stamp):
+        def req(
+            rid, *, stream=False, finished=True, metrics=True, stamp=stamp, prebuilt=0.0
+        ):
             req = _FakeReq(rid, [1], finished=finished)
             req.stream = stream
-            req.time_stats = SimpleNamespace(
-                enable_metrics=metrics, prefill_finished_time=stamp
+            req.time_stats = SchedulerReqTimeStats(
+                enable_metrics=metrics,
+                prefill_finished_time=stamp,
+                decode_prebuilt_finish_time=prebuilt,
+                # A resumed PD request's latest stamp must not shorten its latency.
+                last_decode_prebuilt_finish_time=prebuilt + 0.4 if prebuilt else 0.0,
             )
             return req
 
@@ -603,20 +607,23 @@ class TestOutputStreamerDecodeLatency(unittest.TestCase):
             enable_hicache_storage=lambda: False,
             rust_server=rust_server,
         )
-        streamer._stream_output_generation(
-            [
-                req("streaming", stream=True),
-                req("timed"),
-                req("running", finished=False),
-                req("no_metrics", metrics=False),
-                req("no_stamp", stamp=0.0),
-            ],
-            False,
-        )
+        with patch("time.perf_counter", return_value=1001.0):
+            streamer._stream_output_generation(
+                [
+                    req("streaming", stream=True),
+                    req("timed"),
+                    req("running", finished=False),
+                    req("no_metrics", metrics=False),
+                    req("no_stamp", stamp=0.0),
+                    req("pd_decode", stamp=0.0, prebuilt=stamp),
+                ],
+                False,
+            )
         payload, decode_latencies = rust_server.push_generation.call_args.args[:2]
-        self.assertEqual(payload.rids[1], "timed")
-        self.assertEqual(list(decode_latencies), [1])
-        self.assertGreaterEqual(decode_latencies[1], 0.5)
+        timed = {
+            payload.rids[row]: latency for row, latency in decode_latencies.items()
+        }
+        self.assertEqual(timed, {"timed": 0.5, "pd_decode": 0.5})
 
         python_mode = _accumulator()
         python_mode.accept(req=req("timed"))

@@ -3048,7 +3048,11 @@ class TokenizerManager(TokenizerControlMixin, TokenizerManagerScoreMixin):
         # Non-streaming outputs are batched; use the scheduler's first-token time.
         if getattr(state.obj, "stream", False):
             return None
-        stamp = _scheduler_time_stats(request_stats).prefill_finished_time
+        time_stats = _scheduler_time_stats(request_stats)
+        # A PD decode server never stamps prefill_finished_time.
+        stamp = (
+            time_stats.prefill_finished_time or time_stats.decode_prebuilt_finish_time
+        )
         if stamp is None:
             return None
         ts = convert_realtime_to_time(stamp)
